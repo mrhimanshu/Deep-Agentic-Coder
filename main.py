@@ -134,7 +134,62 @@ class FileViewTool(BaseTool):
         except Exception as e:
             return f'Error file_view: {e}'
 
+class FolderCreateToolInput(BaseModel):
+    path: str = Field(description="Full path (absolute or relative) to create the folder.")
 
+class FolderCreateTool(BaseTool):
+    name: str = "folder_create"
+    description: str = "Creates a new folder (directory) at the given path."
+    args_schema: ClassVar[type[BaseModel]] = FolderCreateToolInput
+
+    def _run(self, path: str) -> str:  # type: ignore[override]
+        try:
+            abs_path = os.path.abspath(os.path.expanduser(path))
+            if os.path.exists(abs_path):
+                return json.dumps({"folder": abs_path, "created": False, "message": "Folder already exists."})
+            os.makedirs(abs_path, exist_ok=True)
+            return json.dumps({"folder": abs_path, "created": "Folder created at given path."})
+        except Exception as e:
+            return f"Error creating folder: {e}"
+
+class FileCreateToolInput(BaseModel):
+    path: str = Field(description="Full path (absolute or relative) to create the file.")
+    content: Optional[str] = Field("", description="Optional initial content to write in the file.")
+
+
+class FileCreateTool(BaseTool):
+    name: str = "file_create"
+    description: str = "Creates a new file at the given path. Optionally writes initial content."
+    args_schema: ClassVar[type[BaseModel]] = FileCreateToolInput
+
+    def _run(self, path: str, content: str = "") -> str:  # type: ignore[override]
+        try:
+            abs_path = os.path.abspath(os.path.expanduser(path))
+
+            # Ensure parent directory exists
+            parent_dir = os.path.dirname(abs_path)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
+
+            if os.path.exists(abs_path):
+                return json.dumps({
+                    "file": abs_path,
+                    "created": False,
+                    "message": "File already exists."
+                })
+
+            # Actually create and write the file
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(content or "")
+
+            return json.dumps({
+                "file": abs_path,
+                "created": True,
+                "message": "File created successfully."
+            })
+        except Exception as e:
+            return f"Error creating file: {e}"
+        
 class FileEditToolInput(BaseModel):
     file_path: str
     old_string: str
@@ -341,6 +396,8 @@ class SimpleAgent:
             FileViewTool(console=self.console),
             FileEditTool(console=self.console),
             DispatchAgentTool(),
+            FolderCreateTool(),
+            FileCreateTool(),
         ]
 
         # Initialize the OpenAI chat model with GPT-4.1-mini, setting temperature to 0 for deterministic output, no max tokens limit, and retry policy
@@ -442,7 +499,7 @@ class SimpleAgent:
             return 'user_input'
 
     async def run(self) -> Union[List, Dict, str]:
-        return self.console.print(await self.agent.ainvoke({'messages': ''}))
+        return self.console.print(await self.agent.ainvoke({'messages': ''}, config = {"recursion_limit": 50}))
 
 
 if __name__ == '__main__':
