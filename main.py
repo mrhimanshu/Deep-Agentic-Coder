@@ -27,6 +27,8 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeEl
 from rich.text import Text
 from rich.syntax import Syntax
 
+import prompt
+
 load_dotenv(os.path.join('.env'), override=True)
 
 # Agent state
@@ -52,15 +54,58 @@ def resolve_path(file_path: str) -> Optional[str]:
             return os.path.join(root, basename)
     return None
 
+# Tools
+class CalculatorToolInput(BaseModel):
+    operation: Literal["add","subtract","multiply","divide"] = Field(description="The operation to perform ('add', 'subtract', 'multiply', 'divide').")
+    a: Union[int, float] = Field(description="The first number.")
+    b: Union[int, float] = Field(description="The second number.")
+
+class CalculatorTool(BaseTool):
+    name: str = 'maths_calculator'
+    description: str = """Define a two-input calculator tool.
+
+    Arg:
+        operation (str): The operation to perform ('add', 'subtract', 'multiply', 'divide').
+        a (float or int): The first number.
+        b (float or int): The second number.
+        
+    Returns:
+        result (float or int): the result of the operation
+    Example
+        Divide: result   = a / b
+        Subtract: result = a - b"""
+    
+
+    def __init__(self, console: Optional[Console] = None, **kwargs: Dict):
+        super().__init__(**kwargs)
+        self._console = console or Console()
+
+    def _run(self, operation: str, a: Union[int, float], b: Union[int, float]) -> Union[int, float]:
+        if operation == 'divide' and b == 0:
+            return {"error": "Division by zero is not allowed."}
+
+        # Perform calculation
+        if operation == 'add':
+            result = a + b
+        elif operation == 'subtract':
+            result = a - b
+        elif operation == 'multiply':
+            result = a * b
+        elif operation == 'divide':
+            result = a / b
+        else: 
+            result = "unknown operation"
+        return result
 
 # Tools
 class FileReadToolInput(BaseModel):
     file_path: str = Field(description='The path to the file to read')
 
-
 class FileReadTool(BaseTool):
     name: str = 'file_read'
-    description: str = 'Reads the entire content of a file given its path.'
+    description: str = ('Reads the entire content of a file given its path.'
+                        'Use this whenever the user asks what is in a file or requests the full contents.')
+    
     args_schema: ClassVar[type[BaseModel]] = FileReadToolInput
 
     def __init__(self, console: Optional[Console] = None, **kwargs: Dict):
@@ -101,7 +146,6 @@ class FileViewToolInput(BaseModel):
     limit: int = Field(2000, description='Maximum number of lines to return')
     truncate_chars: int = Field(2000, description='Max characters per line before truncation')
 
-
 class FileViewTool(BaseTool):
     name: str = 'file_view'
     description: str = (
@@ -134,7 +178,62 @@ class FileViewTool(BaseTool):
         except Exception as e:
             return f'Error file_view: {e}'
 
+class FolderCreateToolInput(BaseModel):
+    path: str = Field(description="Full path (absolute or relative) to create the folder.")
 
+class FolderCreateTool(BaseTool):
+    name: str = "folder_create"
+    description: str = "Creates a new folder (directory) at the given path."
+    args_schema: ClassVar[type[BaseModel]] = FolderCreateToolInput
+
+    def _run(self, path: str) -> str:  # type: ignore[override]
+        try:
+            abs_path = os.path.abspath(os.path.expanduser(path))
+            if os.path.exists(abs_path):
+                return json.dumps({"folder": abs_path, "created": False, "message": "Folder already exists."})
+            os.makedirs(abs_path, exist_ok=True)
+            return json.dumps({"folder": abs_path, "created": "Folder created at given path."})
+        except Exception as e:
+            return f"Error creating folder: {e}"
+
+class FileCreateToolInput(BaseModel):
+    path: str = Field(description="Full path (absolute or relative) to create the file.")
+    content: Optional[str] = Field("", description="Optional initial content to write in the file.")
+
+
+class FileCreateTool(BaseTool):
+    name: str = "file_create"
+    description: str = "Creates a new file at the given path. Optionally writes initial content."
+    args_schema: ClassVar[type[BaseModel]] = FileCreateToolInput
+
+    def _run(self, path: str, content: str = "") -> str:  # type: ignore[override]
+        try:
+            abs_path = os.path.abspath(os.path.expanduser(path))
+
+            # Ensure parent directory exists
+            parent_dir = os.path.dirname(abs_path)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
+
+            if os.path.exists(abs_path):
+                return json.dumps({
+                    "file": abs_path,
+                    "created": False,
+                    "message": "File already exists."
+                })
+
+            # Actually create and write the file
+            with open(abs_path, "w", encoding="utf-8") as f:
+                f.write(content or "")
+
+            return json.dumps({
+                "file": abs_path,
+                "created": True,
+                "message": "File created successfully."
+            })
+        except Exception as e:
+            return f"Error creating file: {e}"
+        
 class FileEditToolInput(BaseModel):
     file_path: str
     old_string: str
@@ -143,7 +242,6 @@ class FileEditToolInput(BaseModel):
     fuzzy: bool = Field(False, description='Enable fuzzy matching of old_string against file content')
     threshold: float = Field(0.8, ge=0.0, le=1.0, description='Fuzzy match threshold (0..1) when fuzzy=true')
     preview_context: int = Field(3, ge=0, description='Unified diff context lines in preview')
-
 
 class FileEditTool(BaseTool):
     name: str = 'file_edit'
@@ -223,7 +321,7 @@ class FileEditTool(BaseTool):
             prompt = 'Accept changes? [y]es / [e]dit params / [n]o: '
             ans = self._console.input(Text(prompt, style='bold yellow')).strip().lower()
             if ans in {'n', 'no'}:
-                return json.dumps({'file': resolved, 'cancelled': True, 'replacements': 0})
+                return json.dumps({'file': resolved, 'cancelled': "User requested to cancel the modification. Ask him for any further change", 'replacements': 0})
             if ans in {'e', 'edit'}:
                 # lightweight param tweak loop
                 self._console.print('[bold]Edit mode[/bold]: press Enter to keep current value.')
@@ -246,7 +344,7 @@ class FileEditTool(BaseTool):
                 self._console.print(Panel.fit(Syntax(diff_text or '(no visible diff)', 'diff', line_numbers=False), title='Proposed Changes (Edited)'))
                 ans2 = self._console.input(Text('Accept edited changes? [y/N]: ', style='bold yellow')).strip().lower()
                 if ans2 not in {'y', 'yes'}:
-                    return json.dumps({'file': resolved, 'cancelled': True, 'replacements': 0})
+                    return json.dumps({'file': resolved, 'cancelled': "User requested to cancel the modification. Ask him for any further change", 'replacements': 0})
 
             # Commit
             with open(resolved, 'w', encoding='utf-8') as f:
@@ -260,7 +358,6 @@ class DispatchAgentInput(BaseModel):
     prompt: str = Field(description='Instruction describing what to search for (e.g., Find references to "encryptPassword" in userAuth.js)')
     threshold: float = Field(0.7, ge=0.0, le=1.0, description='Fuzzy threshold (0..1) for matching the reference token')
     max_results: int = Field(200, gt=0, description='Maximum number of matches to return')
-
 
 class DispatchAgentTool(BaseTool):
     name: str = 'dispatch_agent'
@@ -341,6 +438,9 @@ class SimpleAgent:
             FileViewTool(console=self.console),
             FileEditTool(console=self.console),
             DispatchAgentTool(),
+            FolderCreateTool(),
+            FileCreateTool(),
+            CalculatorTool()
         ]
 
         # Initialize the OpenAI chat model with GPT-4.1-mini, setting temperature to 0 for deterministic output, no max tokens limit, and retry policy
@@ -372,14 +472,12 @@ class SimpleAgent:
         sys = SystemMessage(content=[{
             'type': 'text',
             'text': (
-                'You are a helpful AI assistant with filesystem tools.\n'
-                '- Use file_view for reviewing code slices.\n'
-                '- Use file_edit/file_write which now preview a DIFF and ask before writing (supports fuzzy edits).\n'
-                '- Use dispatch_agent for fuzzy repository search and include scores for judgment.'
+                prompt.SYSTEM_MESSAGE
             ),
             'cache_control': {'type': 'ephemeral'}
         }])
         working_dir_msg = HumanMessage(content=f'Working directory: {os.getcwd()}')
+        
         messages = [sys, working_dir_msg] + state.messages
 
         self.console.print('[bold green]Model Response[/bold green]')
@@ -406,6 +504,7 @@ class SimpleAgent:
             tool_name = call.get('name')
             args = call.get('args', {})
             tool = tools_by_name.get(tool_name)
+           
             if not tool:
                 payload = json.dumps({'error': f'Unknown tool {tool_name}', 'args': args})
                 responses.append(ToolMessage(content=payload, name=tool_name or 'unknown', tool_call_id=call.get('id')))
@@ -413,8 +512,9 @@ class SimpleAgent:
             try:
                 if hasattr(tool, '_arun'):
                     result = await tool._arun(**args)  # type: ignore[misc]
-                else:
+                elif hasattr(tool, '_run'):
                     result = tool._run(**args)  # type: ignore[misc]
+                    
             except TypeError as e:
                 result = f'Tool invocation error for {tool_name}: {e}\nArgs: {args}'
             except Exception as e:
@@ -442,7 +542,7 @@ class SimpleAgent:
             return 'user_input'
 
     async def run(self) -> Union[List, Dict, str]:
-        return self.console.print(await self.agent.ainvoke({'messages': ''}))
+        return self.console.print(await self.agent.ainvoke({'messages': ''}, config = {"recursion_limit": 50}))
 
 
 if __name__ == '__main__':
