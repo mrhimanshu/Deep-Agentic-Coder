@@ -520,17 +520,6 @@ class SimpleAgent:
             except Exception as e:
                 result = f'Unexpected error during {tool_name}: {e}'
 
-            # title = f"Tool Result: {tool_name}"
-            # try:
-            #     if isinstance(result, str) and (result.strip().startswith('{') or result.strip().startswith('[')):
-            #         pretty = json.dumps(json.loads(result), indent=2, ensure_ascii=False)
-            #         self.console.print(Panel.fit(Syntax(pretty, 'json', line_numbers=False), title=title), style='magenta')
-            #     else:
-            #         lang = 'python' if '\n' in str(result) else 'bash'
-            #         self.console.print(Panel.fit(Syntax(str(result), lang, line_numbers=False), title=title), style='magenta')
-            # except Exception:
-                # self.console.print(Panel.fit(str(result), title=title), style='magenta')
-
             responses.append(ToolMessage(content=str(result), name=tool_name, tool_call_id=call.get('id')))
 
         return {'messages': responses}
